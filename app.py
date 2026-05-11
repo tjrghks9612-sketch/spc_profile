@@ -87,7 +87,7 @@ class ROIImageView(QLabel):
     def __init__(self, title: str):
         super().__init__()
         self.title = title
-        self.setMinimumSize(360, 260)
+        self.setMinimumSize(320, 190)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setAlignment(Qt.AlignCenter)
         self.setMouseTracking(True)
@@ -255,7 +255,7 @@ class ResultPanel(QFrame):
             row = QFrame()
             row.setObjectName("MetricRow")
             row_layout = QHBoxLayout(row)
-            row_layout.setContentsMargins(10, 7, 10, 7)
+            row_layout.setContentsMargins(8, 4, 8, 4)
             name = QLabel(label)
             value = QLabel("-")
             value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -368,16 +368,19 @@ class MainWindow(QMainWindow):
         plot_layout = QVBoxLayout(plot_panel)
         plot_layout.setContentsMargins(0, 0, 0, 0)
         toolbar = QHBoxLayout()
-        toolbar.setContentsMargins(0, 0, 0, 6)
+        toolbar.setContentsMargins(0, 0, 0, 2)
         toolbar.addStretch(1)
         self.reset_3d_view_btn = QPushButton("3D 뷰 초기화")
+        self.reset_3d_view_btn.setObjectName("CompactButton")
         self.reset_3d_view_btn.setEnabled(False)
         self.reset_3d_view_btn.clicked.connect(self.reset_3d_views)
         toolbar.addWidget(self.reset_3d_view_btn)
         plot_layout.addLayout(toolbar)
         plot_layout.addWidget(self.tabs)
         main_splitter.addWidget(plot_panel)
-        main_splitter.setSizes([650, 330])
+        main_splitter.setSizes([470, 510])
+        main_splitter.setStretchFactor(0, 2)
+        main_splitter.setStretchFactor(1, 5)
         return page
 
     def _build_left_panel(self) -> QWidget:
@@ -646,6 +649,7 @@ class MainWindow(QMainWindow):
             QPushButton:pressed { background:#0EA5E9; color:#06111F; }
             QPushButton:checked { background:#0EA5E9; color:#06111F; border-color:#7DD3FC; font-weight:700; }
             QPushButton:disabled { color:#64748B; background:#111827; border-color:#1F2937; }
+            QPushButton#CompactButton { padding:5px 9px; }
             QDoubleSpinBox, QSpinBox { background:#0B1120; border:1px solid #334155; border-radius:6px; padding:6px 24px 6px 6px; color:#E5E7EB; }
             QDoubleSpinBox::up-button, QSpinBox::up-button { subcontrol-origin:border; subcontrol-position:top right; width:20px; border-left:1px solid #334155; border-bottom:1px solid #273449; border-top-right-radius:6px; background:#172033; }
             QDoubleSpinBox::down-button, QSpinBox::down-button { subcontrol-origin:border; subcontrol-position:bottom right; width:20px; border-left:1px solid #334155; border-bottom-right-radius:6px; background:#172033; }
