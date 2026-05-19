@@ -69,6 +69,7 @@ class SingleImageItem:
 @dataclass
 class SingleProfileRunResult:
     item: SingleImageItem
+    roi: Optional[tuple[int, int, int, int]] = None
     profile: Optional[ProfileResult] = None
     cd_result: Optional[SingleDepthCDResult] = None
     error: str = ""
@@ -77,7 +78,6 @@ class SingleProfileRunResult:
 @dataclass
 class SingleBatchState:
     results: list[SingleProfileRunResult]
-    roi: tuple[int, int, int, int]
     params: dict
 
 
@@ -299,6 +299,9 @@ class MainWindow(QMainWindow):
         self.vertical_image: Optional[np.ndarray] = None
         self.state: Optional[AnalysisState] = None
         self.single_images: list[SingleImageItem] = []
+        self.single_rois: list[Optional[tuple[int, int, int, int]]] = []
+        self.single_results: list[SingleProfileRunResult] = []
+        self.single_current_index = 0
         self.single_state: Optional[SingleBatchState] = None
 
         self._build_ui()
@@ -591,8 +594,22 @@ class MainWindow(QMainWindow):
         title = QLabel("공유 ROI 미리보기")
         title.setObjectName("PanelTitle")
         layout.addWidget(title)
+        nav_layout = QHBoxLayout()
+        self.single_prev_btn = QPushButton("Previous")
+        self.single_next_btn = QPushButton("Next")
+        self.single_image_index_label = QLabel("-")
+        self.single_image_index_label.setAlignment(Qt.AlignCenter)
+        self.single_prev_btn.clicked.connect(self.show_previous_single_image)
+        self.single_next_btn.clicked.connect(self.show_next_single_image)
+        nav_layout.addWidget(self.single_prev_btn)
+        nav_layout.addWidget(self.single_image_index_label, 1)
+        nav_layout.addWidget(self.single_next_btn)
+        layout.addLayout(nav_layout)
+
         self.single_view = ROIImageView("Single section")
+        self.single_view.roi_changed.connect(self._store_current_single_roi)
         layout.addWidget(self.single_view)
+        self._update_single_navigation()
         return panel
 
     def _build_single_result_panel(self) -> QWidget:
@@ -609,7 +626,7 @@ class MainWindow(QMainWindow):
             ("success_count", "Success"),
             ("fail_count", "Failed"),
             ("depth_step_um", "Depth step"),
-            ("roi", "Shared ROI"),
+            ("roi", "Current ROI"),
         ]
         for key, label in items:
             row = QFrame()
@@ -715,7 +732,8 @@ class MainWindow(QMainWindow):
                 SingleImageItem(name=Path(path).name, image=to_grayscale(load_image(path)))
                 for path in paths
             ]
-            self.single_view.set_image(self.single_images[0].image)
+            self._reset_single_image_state()
+            self._show_single_image(0)
             self.single_state = None
             self.single_save_btn.setEnabled(False)
             self._clear_single_results()
@@ -733,8 +751,12 @@ class MainWindow(QMainWindow):
             )
             for idx, (cd, height, seed) in enumerate(specs)
         ]
-        self.single_view.set_image(self.single_images[0].image)
-        self.single_view.set_roi(_default_synthetic_roi(self.single_images[0].image))
+        self._reset_single_image_state()
+        for index, item in enumerate(self.single_images):
+            roi = _default_synthetic_roi(item.image)
+            self.single_rois[index] = roi
+            self.single_results[index].roi = roi
+        self._show_single_image(0)
         self.single_state = None
         self.single_save_btn.setEnabled(False)
         self._clear_single_results()
@@ -760,6 +782,55 @@ class MainWindow(QMainWindow):
             "smoothing_strength": self.single_smoothing_slider.value(),
             "morph_strength": self.single_morph_slider.value(),
         }
+
+    def _reset_single_image_state(self) -> None:
+        self.single_current_index = 0
+        self.single_rois = [None for _ in self.single_images]
+        self.single_results = [SingleProfileRunResult(item=item) for item in self.single_images]
+        self._update_single_navigation()
+
+    def _store_current_single_roi(self, roi: tuple[int, int, int, int]) -> None:
+        if 0 <= self.single_current_index < len(self.single_rois):
+            self.single_rois[self.single_current_index] = roi
+            self.single_results[self.single_current_index].roi = roi
+            if self.single_state is not None:
+                self.single_state.results = self.single_results
+            self.single_result_labels["roi"].setText(str(roi))
+
+    def _show_single_image(self, index: int) -> None:
+        if not (0 <= index < len(self.single_images)):
+            self._update_single_navigation()
+            return
+        self.single_current_index = index
+        result = self.single_results[index] if index < len(self.single_results) else None
+        if result is not None and result.profile is not None:
+            self.single_view.set_overlay(plot_detection_overlay(result.item.image, result.profile))
+        else:
+            self.single_view.set_image(self.single_images[index].image)
+        roi = self.single_rois[index] if index < len(self.single_rois) else None
+        if roi is not None:
+            self.single_view.set_roi(roi)
+        self._update_single_navigation()
+        if hasattr(self, "single_table") and index < self.single_table.rowCount():
+            self.single_table.selectRow(index)
+
+    def _update_single_navigation(self) -> None:
+        count = len(self.single_images)
+        has_images = count > 0
+        if hasattr(self, "single_prev_btn"):
+            self.single_prev_btn.setEnabled(has_images and self.single_current_index > 0)
+            self.single_next_btn.setEnabled(has_images and self.single_current_index < count - 1)
+            if has_images:
+                name = self.single_images[self.single_current_index].name
+                self.single_image_index_label.setText(f"{self.single_current_index + 1}/{count} - {name}")
+            else:
+                self.single_image_index_label.setText("-")
+
+    def show_previous_single_image(self) -> None:
+        self._show_single_image(self.single_current_index - 1)
+
+    def show_next_single_image(self) -> None:
+        self._show_single_image(self.single_current_index + 1)
 
     def run_analysis(self) -> None:
         self.result_panel.clear()
@@ -898,6 +969,75 @@ class MainWindow(QMainWindow):
             messages.append(f"{clipped_count}개 이미지는 요청 depth보다 profile height가 작아 유효 height까지만 계산했습니다.")
         self.single_message.setText("\n".join(messages))
 
+    def run_single_profile_analysis(self) -> None:
+        if not self.single_images:
+            self._single_fail("단일 모드 이미지를 먼저 불러와야 합니다.")
+            return
+        if not (0 <= self.single_current_index < len(self.single_images)):
+            self._single_fail("No current image is selected.")
+            return
+        current_roi = self.single_view.roi
+        if current_roi is None:
+            self._single_fail("Set ROI for the current image before analysis.")
+            return
+
+        params = self._single_params()
+        if params["pixel_size_um"] <= 0:
+            self._single_fail("pixel_size_um은 0보다 커야 합니다.")
+            return
+        if params["max_depth_um"] <= 0:
+            self._single_fail("max_depth_um은 0보다 커야 합니다.")
+            return
+        if params["depth_step_um"] <= 0:
+            self._single_fail("depth_step_um은 0보다 커야 합니다.")
+            return
+
+        item = self.single_images[self.single_current_index]
+        self._store_current_single_roi(current_roi)
+        try:
+            profile = analyze_section(
+                item.image,
+                current_roi,
+                pixel_size_um=params["pixel_size_um"],
+                threshold_sensitivity=params["threshold_sensitivity"],
+                smoothing_strength=params["smoothing_strength"],
+                morph_strength=params["morph_strength"],
+                axis_name="single",
+                coordinate_name="x_um",
+            )
+            cd_result = compute_cd_by_depth(profile, params["max_depth_um"], params["depth_step_um"])
+            self.single_results[self.single_current_index] = SingleProfileRunResult(
+                item=item,
+                roi=current_roi,
+                profile=profile,
+                cd_result=cd_result,
+            )
+            self.single_view.set_overlay(plot_detection_overlay(item.image, profile))
+            self.single_view.set_roi(current_roi)
+        except (DetectionError, ValueError) as exc:
+            self.single_results[self.single_current_index] = SingleProfileRunResult(item=item, roi=current_roi, error=str(exc))
+        except Exception as exc:
+            self.single_results[self.single_current_index] = SingleProfileRunResult(item=item, roi=current_roi, error=f"Unexpected error: {exc}")
+
+        success = [result for result in self.single_results if result.profile is not None and result.cd_result is not None]
+        self.single_state = SingleBatchState(results=self.single_results, params=params)
+        self.single_save_btn.setEnabled(bool(success))
+        self._update_single_results()
+        self._replace_single_profile_canvas(plot_single_batch_cd_depth(self.single_results))
+        self._update_single_navigation()
+
+        analyzed = [result for result in self.single_results if result.profile is not None or result.error]
+        fail_count = len([result for result in analyzed if result.profile is None])
+        messages = [f"Analysis updated. {len(success)} success, {fail_count} failed, {len(self.single_images) - len(analyzed)} not analyzed."]
+        clipped_count = sum(
+            1
+            for result in success
+            if result.cd_result.effective_max_depth_um < result.cd_result.requested_max_depth_um
+        )
+        if clipped_count:
+            messages.append(f"{clipped_count} images were clipped to their effective profile height.")
+        self.single_message.setText("\n".join(messages))
+
     def _clear_single_results(self) -> None:
         for label in self.single_result_labels.values():
             label.setText("-")
@@ -909,11 +1049,13 @@ class MainWindow(QMainWindow):
             return
         results = self.single_state.results
         success = [result for result in results if result.profile is not None and result.cd_result is not None]
+        failed = [result for result in results if result.profile is None and bool(result.error)]
         self.single_result_labels["image_count"].setText(str(len(results)))
         self.single_result_labels["success_count"].setText(str(len(success)))
-        self.single_result_labels["fail_count"].setText(str(len(results) - len(success)))
+        self.single_result_labels["fail_count"].setText(str(len(failed)))
         self.single_result_labels["depth_step_um"].setText(f"{self.single_state.params['depth_step_um']:.4f} um")
-        self.single_result_labels["roi"].setText(str(self.single_state.roi))
+        current_roi = self.single_rois[self.single_current_index] if self.single_rois else None
+        self.single_result_labels["roi"].setText(str(current_roi) if current_roi else "-")
 
         self.single_table.setRowCount(len(results))
         for row_idx, result in enumerate(results):
@@ -926,7 +1068,7 @@ class MainWindow(QMainWindow):
                     str(result.cd_result.depth_um.size),
                 ]
             else:
-                values = [result.item.name, result.error or "FAILED", "-", "-", "-"]
+                values = [result.item.name, result.error or "NOT_ANALYZED", "-", "-", "-"]
             for col_idx, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 if col_idx >= 2:
@@ -934,16 +1076,19 @@ class MainWindow(QMainWindow):
                 self.single_table.setItem(row_idx, col_idx, item)
 
     def _populate_single_loaded_table(self) -> None:
-        self.single_table.setRowCount(len(self.single_images))
-        for row_idx, item in enumerate(self.single_images):
-            values = [item.name, "LOADED", "-", "-", "-"]
+        results = self.single_results or [SingleProfileRunResult(item=item) for item in self.single_images]
+        self.single_table.setRowCount(len(results))
+        for row_idx, result in enumerate(results):
+            values = [result.item.name, "LOADED", "-", "-", "-"]
             for col_idx, value in enumerate(values):
                 self.single_table.setItem(row_idx, col_idx, QTableWidgetItem(value))
         self.single_result_labels["image_count"].setText(str(len(self.single_images)))
         self.single_result_labels["success_count"].setText("-")
         self.single_result_labels["fail_count"].setText("-")
         self.single_result_labels["depth_step_um"].setText(f"{self.single_depth_step_spin.value():.4f} um")
-        self.single_result_labels["roi"].setText(str(self.single_view.roi) if self.single_view.roi else "-")
+        current_roi = self.single_rois[self.single_current_index] if self.single_rois else None
+        self.single_result_labels["roi"].setText(str(current_roi) if current_roi else "-")
+        self._update_single_navigation()
 
     def _replace_single_profile_canvas(self, figure) -> None:
         new_canvas = _make_canvas(figure)
@@ -1014,7 +1159,6 @@ class MainWindow(QMainWindow):
             save_single_batch_outputs(
                 output_dir,
                 self.single_state.results,
-                self.single_state.roi,
                 self.single_state.params,
             )
             self.single_message.setText(f"Batch 프로파일 결과 저장 완료:\n{output_dir}")
