@@ -179,10 +179,35 @@ def _safe_stem(name: str, index: int) -> str:
     return safe[:80] or f"image_{index + 1}"
 
 
+def _graph_raw_data_frame(image_name: str, profile: ProfileResult, cd_result: SingleDepthCDResult) -> pd.DataFrame:
+    depth = np.clip(profile.height_um - profile.z_um, 0.0, None)
+    depth = depth - float(np.nanmin(depth))
+    profile_rows = pd.DataFrame(
+        {
+            "image_name": image_name,
+            "graph": "top_boundary_profile",
+            "x_axis": profile.coordinate_name,
+            "y_axis": "depth_from_apex_um",
+            "x_value": profile.coord_um,
+            "y_value": depth,
+        }
+    )
+    cd_rows = pd.DataFrame(
+        {
+            "image_name": image_name,
+            "graph": "cd_by_depth",
+            "x_axis": "CD_um",
+            "y_axis": "depth_from_apex_um",
+            "x_value": cd_result.cd_um,
+            "y_value": cd_result.depth_um,
+        }
+    )
+    return pd.concat([profile_rows, cd_rows], ignore_index=True)
+
+
 def save_single_batch_outputs(
     output_dir: str | Path,
     results,
-    shared_roi: tuple[int, int, int, int],
     params: dict[str, Any],
 ) -> Path:
     output_dir = Path(output_dir)
@@ -191,28 +216,30 @@ def save_single_batch_outputs(
     profile_dir = output_dir / "single_profiles"
     cd_dir = output_dir / "cd_by_depth"
     plot_dir = output_dir / "single_plots"
-    for directory in [overlay_dir, profile_dir, cd_dir, plot_dir]:
+    raw_data_dir = output_dir / "single_graph_raw_data"
+    for directory in [overlay_dir, profile_dir, cd_dir, plot_dir, raw_data_dir]:
         directory.mkdir(parents=True, exist_ok=True)
 
     summary_rows = []
     for index, result in enumerate(results):
         name = result.item.name
         stem = _safe_stem(name, index)
+        roi = result.roi
         if result.profile is None or result.cd_result is None:
             summary_rows.append(
                 {
                     "image": name,
-                    "status": "FAILED",
+                    "status": "FAILED" if result.error else "NOT_ANALYZED",
                     "error": result.error,
                     "CD_um": np.nan,
                     "H_um": np.nan,
                     "effective_max_depth_um": np.nan,
                     "depth_step_um": float(params["depth_step_um"]),
                     "depth_count": 0,
-                    "roi_x": shared_roi[0],
-                    "roi_y": shared_roi[1],
-                    "roi_w": shared_roi[2],
-                    "roi_h": shared_roi[3],
+                    "roi_x": roi[0] if roi else np.nan,
+                    "roi_y": roi[1] if roi else np.nan,
+                    "roi_w": roi[2] if roi else np.nan,
+                    "roi_h": roi[3] if roi else np.nan,
                 }
             )
             continue
@@ -233,6 +260,7 @@ def save_single_batch_outputs(
         ).to_csv(profile_dir / f"{stem}_profile.csv", index=False)
         cd_result.to_frame().to_csv(cd_dir / f"{stem}_cd_by_depth.csv", index=False)
         plot_single_profile_cd_depth(profile, cd_result, plot_dir / f"{stem}_profile_cd_depth.png")
+        _graph_raw_data_frame(name, profile, cd_result).to_csv(raw_data_dir / f"{stem}_graph_raw_data.csv", index=False)
 
         summary_rows.append(
             {
@@ -245,10 +273,10 @@ def save_single_batch_outputs(
                 "effective_max_depth_um": cd_result.effective_max_depth_um,
                 "depth_step_um": cd_result.depth_step_um,
                 "depth_count": int(cd_result.depth_um.size),
-                "roi_x": shared_roi[0],
-                "roi_y": shared_roi[1],
-                "roi_w": shared_roi[2],
-                "roi_h": shared_roi[3],
+                "roi_x": roi[0] if roi else np.nan,
+                "roi_y": roi[1] if roi else np.nan,
+                "roi_w": roi[2] if roi else np.nan,
+                "roi_h": roi[3] if roi else np.nan,
                 "pixel_size_um": float(params["pixel_size_um"]),
                 "threshold_sensitivity": float(params["threshold_sensitivity"]),
                 "smoothing_strength": float(params["smoothing_strength"]),
