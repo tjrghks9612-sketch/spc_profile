@@ -1,0 +1,194 @@
+name: NEC election duplicate check
+
+on:
+  push:
+    branches: [chatgpt-nec-election-check]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas openpyxl xlrd requests tqdm
+      - name: Run NEC duplicate check
+        shell: bash
+        run: |
+          cat > nec_check.py <<'PY'
+          from __future__ import annotations
+          import itertools, re, zipfile, requests
+          from pathlib import Path
+          import pandas as pd
+          from tqdm import tqdm
+
+          URLS = {
+              '2022_8th': 'https://img.nec.go.kr/common/board/Download.do?bcIdx=187608&cbIdx=1129&streFileNm=b8c2df47-a118-441d-ab07-7b0f1e6a90f2.zip',
+              '2018_7th': 'https://img.nec.go.kr/common/board/Download.do?bcIdx=14979&cbIdx=1129&streFileNm=BBS_201808220327498832.zip',
+              '2014_6th_in_3to6': 'https://img.nec.go.kr/common/board/Download.do?bcIdx=14979&cbIdx=1129&streFileNm=BBS_201808220327135370.zip',
+          }
+
+          WORK = Path('nec_out'); ZIPD = WORK/'zips'; EXTD = WORK/'extracted'; OUT = WORK/'result'
+          ZIPD.mkdir(parents=True, exist_ok=True); EXTD.mkdir(parents=True, exist_ok=True); OUT.mkdir(parents=True, exist_ok=True)
+
+          def num(x):
+              if pd.isna(x): return None
+              s = re.sub(r'[,\s]', '', str(x).strip())
+              if not s or s.lower() == 'nan': return None
+              try: return int(float(s))
+              except Exception: return None
+
+          def norm(x):
+              if pd.isna(x): return ''
+              return str(x).strip().replace('\n',' ').replace('\r',' ')
+
+          def download(tag, url):
+              p = ZIPD/f'{tag}.zip'
+              if p.exists() and p.stat().st_size > 1000: return p
+              print('DOWNLOAD', tag, url)
+              r = requests.get(url, timeout=180, headers={'User-Agent':'Mozilla/5.0'})
+              r.raise_for_status()
+              p.write_bytes(r.content)
+              print(tag, p.stat().st_size)
+              return p
+
+          def extract(tag, zp):
+              d = EXTD/tag; d.mkdir(parents=True, exist_ok=True)
+              with zipfile.ZipFile(zp) as z:
+                  for info in z.infolist():
+                      name = info.filename
+                      try: name = name.encode('cp437').decode('cp949')
+                      except Exception: pass
+                      target = d/name
+                      if info.is_dir(): target.mkdir(parents=True, exist_ok=True); continue
+                      target.parent.mkdir(parents=True, exist_ok=True)
+                      target.write_bytes(z.read(info))
+              return d
+
+          def header_row(row):
+              joined = '|'.join(norm(v) for v in row.tolist())
+              return ('구분' in joined and '투표수' in joined and ('읍면동' in joined or '읍·면·동' in joined))
+
+          def find_col(cols, pats):
+              for pat in pats:
+                  for c in cols:
+                      if re.search(pat, str(c)): return c
+              return None
+
+          def vote_cols(df):
+              exc = re.compile(r'(선거|시도|구시군|시군구|읍면동|읍·면·동|투표구|구분|선거인수|투표수|^계$|계$|무효|기권|비고|소계|합계)')
+              out=[]
+              for c in df.columns:
+                  cs=str(c).strip()
+                  if not cs or exc.search(cs): continue
+                  sample = df[c].dropna().head(80).map(num)
+                  if sample.notna().sum() >= 1: out.append(c)
+              return out
+
+          def parse_excel(path, tag):
+              rows=[]
+              try: xls = pd.ExcelFile(path)
+              except Exception as e:
+                  print('OPEN_FAIL', path, e); return rows
+              for sheet in xls.sheet_names:
+                  try: raw = pd.read_excel(path, sheet_name=sheet, header=None, dtype=object)
+                  except Exception as e:
+                      print('READ_FAIL', path, sheet, e); continue
+                  h=None
+                  for i in range(min(len(raw), 20)):
+                      if header_row(raw.iloc[i]): h=i; break
+                  if h is None: continue
+                  df = raw.iloc[h+1:].copy()
+                  df.columns = [norm(v) or f'col_{i}' for i,v in enumerate(raw.iloc[h].tolist())]
+                  df = df.dropna(how='all')
+                  cols=list(df.columns)
+                  sido = find_col(cols, [r'^시도', r'시도명', r'선거구명'])
+                  sgg = find_col(cols, [r'구시군', r'시군구'])
+                  emd = find_col(cols, [r'읍면동', r'읍·면·동'])
+                  kind = find_col(cols, [r'^구분$', r'투표구'])
+                  invalid = find_col(cols, [r'무효'])
+                  abstain = find_col(cols, [r'기권'])
+                  vc = vote_cols(df)
+                  if not emd or not kind or len(vc)<2: continue
+                  tmp = pd.DataFrame({
+                      'year_tag': tag,
+                      'source_file': str(path),
+                      'sheet_name': str(sheet),
+                      'sido': df[sido].map(norm) if sido else '',
+                      'sgg': df[sgg].map(norm) if sgg else '',
+                      'emd': df[emd].map(norm),
+                      'kind': df[kind].map(norm),
+                      'no1_col': vc[0], 'no2_col': vc[1],
+                      'no1_votes': df[vc[0]].map(num),
+                      'no2_votes': df[vc[1]].map(num),
+                      'invalid': df[invalid].map(num) if invalid else None,
+                      'abstain': df[abstain].map(num) if abstain else None,
+                      'candidate_cols': '|'.join(vc),
+                  })
+                  for j,c in enumerate(vc, start=1): tmp[f'cand_{j:02d}']=df[c].map(num)
+                  sigcols=[c for c in tmp.columns if c.startswith('cand_')]+['invalid','abstain']
+                  tmp['all_signature']=tmp[sigcols].astype('Int64').astype(str).agg('|'.join, axis=1)
+                  tmp = tmp.dropna(subset=['no1_votes','no2_votes'])
+                  tmp = tmp[~tmp['emd'].isin(['','계','합계'])]
+                  tmp = tmp[tmp['kind'].str.contains('관내사전', na=False)]
+                  if len(tmp): rows.append(tmp)
+              return rows
+
+          # download/extract/parse
+          std=[]
+          for tag,u in URLS.items():
+              try: root=extract(tag, download(tag,u))
+              except Exception as e:
+                  print('ZIP_FAIL', tag, e); continue
+              excels=[p for p in root.rglob('*') if p.suffix.lower() in ['.xls','.xlsx','.xlsm'] and not p.name.startswith('~$')]
+              print('EXCELS', tag, len(excels))
+              for p in tqdm(excels, desc=tag):
+                  std += parse_excel(p, tag)
+          if not std:
+              raise SystemExit('NO_ADVANCE_ROWS')
+          rows=pd.concat(std, ignore_index=True)
+          rows.to_csv(OUT/'advance_rows_all.csv', index=False, encoding='utf-8-sig')
+
+          def pairs_by(value_cols):
+              pairs=[]
+              group_cols=['year_tag','sido','sgg','sheet_name']
+              for key,g in rows.groupby(group_cols+value_cols, dropna=False):
+                  if len(g)<2: continue
+                  recs=list(g.to_dict('records'))
+                  for a,b in itertools.combinations(recs,2):
+                      if a['emd']==b['emd'] and a['source_file']==b['source_file']: continue
+                      pairs.append({
+                          'year_tag':a['year_tag'], 'sido':a['sido'], 'sgg':a['sgg'], 'sheet_name':a['sheet_name'],
+                          'a_emd':a['emd'], 'b_emd':b['emd'], 'a_kind':a['kind'], 'b_kind':b['kind'],
+                          'no1_votes':a['no1_votes'], 'no2_votes':a['no2_votes'],
+                          'a_invalid':a['invalid'], 'b_invalid':b['invalid'], 'a_abstain':a['abstain'], 'b_abstain':b['abstain'],
+                          'a_file':a['source_file'], 'b_file':b['source_file'],
+                          'a_candidate_cols':a['candidate_cols'], 'b_candidate_cols':b['candidate_cols'],
+                      })
+              return pd.DataFrame(pairs)
+
+          top2 = pairs_by(['no1_votes','no2_votes'])
+          allv = pairs_by(['all_signature'])
+          top2.to_csv(OUT/'duplicate_pairs_top2_same_parent.csv', index=False, encoding='utf-8-sig')
+          allv.to_csv(OUT/'duplicate_pairs_all_candidates_invalid_abstain_same_parent.csv', index=False, encoding='utf-8-sig')
+          summary=pd.DataFrame([
+              {'metric':'advance_rows','value':len(rows)},
+              {'metric':'duplicate_pairs_top2_same_parent','value':len(top2)},
+              {'metric':'duplicate_pairs_all_candidates_invalid_abstain_same_parent','value':len(allv)},
+          ])
+          summary.to_csv(OUT/'summary.csv', index=False, encoding='utf-8-sig')
+          print(summary.to_string(index=False))
+          if len(top2): print(top2[['year_tag','sido','sgg','sheet_name','a_emd','b_emd','no1_votes','no2_votes','a_invalid','b_invalid','a_abstain','b_abstain']].head(50).to_string(index=False))
+          PY
+          python nec_check.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nec-election-duplicate-results
+          path: nec_out/result
+          if-no-files-found: error
