@@ -168,9 +168,11 @@ apex depth = 0
 downward direction = positive
 ```
 
-`max_depth_um`은 꼭대기에서 아래로 어디까지 CD를 기록할지 정하는 값입니다. 입력한 값이 실제 profile height보다 크면 실제 height까지만 계산합니다. `depth_step_um`은 depth sampling 간격입니다.
+`max_depth_um`은 꼭대기에서 아래로 어디까지 CD를 기록할지 정하는 값입니다. 입력한 값이 실제 profile height보다 크면 실제 height까지만 계산합니다. `depth_step_um`은 depth sampling 간격입니다. `taper_step_um`은 감지된 구조물 중심에서 좌/우 방향으로 taper를 샘플링할 거리 간격입니다.
 
 각 depth에서의 CD는 top boundary profile과 해당 depth 수평선의 좌우 교차 위치를 보간해서 계산합니다. 실제 profile 노이즈 때문에 depth가 좌우 edge 방향으로 흔들리는 경우를 줄이기 위해, apex에서 좌/우 edge로 나가는 방향의 depth를 단조 증가 envelope로 보정한 뒤 CD를 계산합니다.
+
+각 offset에서의 taper는 apex 기준 depth profile의 국소 기울기를 사용합니다. `taper_angle_deg`는 수평 방향 대비 각도이고, `taper_from_vertical_deg`는 수직 방향 대비 각도입니다.
 
 단일 모드 batch 저장 파일은 `output/YYYYMMDD_HHMMSS` 아래에 생성됩니다.
 
@@ -179,7 +181,29 @@ downward direction = positive
 - `single_overlays/{image}_overlay.png`
 - `single_profiles/{image}_profile.csv`
 - `cd_by_depth/{image}_cd_by_depth.csv`
+- `taper_by_offset/{image}_taper_by_offset.csv`
 - `single_plots/{image}_profile_cd_depth.png`
+- `single_graph_raw_data/taper_by_offset_raw_data.csv`
+
+## HHS 모드
+
+상단의 `HHS` 버튼을 누르면 Hill-on-Hill Score 전용 분석 화면으로 전환됩니다. HHS는 기존 ROI 기반 profile 추출 로직으로 얻은 단일 단면 profile의 `x_um`, `height_from_baseline_um` 데이터를 사용합니다. profile 추출과 HHS 계산은 분리되어 있으며, HHS 계산은 특정 2차곡선 fitting을 사용하지 않습니다.
+
+HHS 계산은 profile을 정규화한 뒤 약한 Gaussian smoothing으로 측정 노이즈를 줄이고, 강한 Gaussian smoothing으로 큰 언덕 기준선 `B(x)`를 만듭니다. 중앙부 `center_width` 안에서 `profile - B(x)`가 양수인 부분의 면적을 전체 profile 면적으로 나눈 값이 `hhs`입니다.
+
+기본 설정값:
+
+- `light_smooth_sigma`: `0.015`
+- `baseline_smooth_sigma`: `0.12`
+- `center_width`: `0.35`
+
+HHS 저장 파일은 `output/YYYYMMDD_HHMMSS` 아래에 생성됩니다.
+
+- `hhs_result_summary.csv`
+- `hhs_batch_distribution.png`
+- `hhs_overlays/{image}_hhs_overlay.png`
+- `hhs_profiles/{image}_hhs_profile.csv`
+- `hhs_plots/{image}_hhs_profile.png`
 
 ## 한계
 

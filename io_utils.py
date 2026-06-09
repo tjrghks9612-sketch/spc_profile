@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from area_calculation import CapMetrics
+from image_processing import save_image
 from plotting import plot_3d_surface, plot_cap_highlight, plot_cap_top_view, plot_detection_overlay, plot_profiles
 from profile_extraction import ProfileResult
 from surface_model import SurfaceGrid
@@ -79,8 +80,8 @@ def save_outputs(
 
     horizontal_overlay = plot_detection_overlay(horizontal_image, horizontal)
     vertical_overlay = plot_detection_overlay(vertical_image, vertical)
-    cv2.imwrite(str(output_dir / "horizontal_detection_overlay.png"), cv2.cvtColor(horizontal_overlay, cv2.COLOR_RGB2BGR))
-    cv2.imwrite(str(output_dir / "vertical_detection_overlay.png"), cv2.cvtColor(vertical_overlay, cv2.COLOR_RGB2BGR))
+    save_image(output_dir / "horizontal_detection_overlay.png", cv2.cvtColor(horizontal_overlay, cv2.COLOR_RGB2BGR))
+    save_image(output_dir / "vertical_detection_overlay.png", cv2.cvtColor(vertical_overlay, cv2.COLOR_RGB2BGR))
 
     _profile_to_frame(horizontal).to_csv(output_dir / "horizontal_profile.csv", index=False)
     _profile_to_frame(vertical).to_csv(output_dir / "vertical_profile.csv", index=False)

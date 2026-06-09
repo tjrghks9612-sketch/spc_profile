@@ -24,10 +24,21 @@ ROI = Tuple[int, int, int, int]
 
 
 def load_image(path: str | Path) -> np.ndarray:
-    image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    path = Path(path)
+    data = np.fromfile(path, dtype=np.uint8)
+    image = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
     if image is None:
         raise ValueError(f"이미지를 불러올 수 없습니다: {path}")
     return image
+
+
+def save_image(path: str | Path, image: np.ndarray) -> None:
+    path = Path(path)
+    ext = path.suffix or ".png"
+    ok, encoded = cv2.imencode(ext, image)
+    if not ok:
+        raise ValueError(f"이미지를 저장할 수 없습니다: {path}")
+    encoded.tofile(path)
 
 
 def to_grayscale(image: np.ndarray) -> np.ndarray:

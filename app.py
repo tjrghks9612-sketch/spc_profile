@@ -7,6 +7,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
+import pandas as pd
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from PySide6.QtCore import QPoint, Qt, Signal
 from PySide6.QtGui import QImage, QMouseEvent, QPainter, QPen, QPixmap
@@ -37,17 +38,20 @@ from PySide6.QtWidgets import (
 
 from area_calculation import CapMetrics, compute_cap_metrics
 from image_processing import DetectionError, clamp_roi, generate_synthetic_mound_image, generate_synthetic_pair, load_image, to_grayscale
+from hhs_analysis import DEFAULT_HHS_SETTINGS, compute_hill_on_hill_score
 from io_utils import build_summary, create_output_dir, save_outputs
 from plotting import (
     plot_3d_surface,
     plot_cap_highlight,
     plot_cap_top_view,
     plot_detection_overlay,
+    plot_hhs_batch,
+    plot_hhs_profile,
     plot_profiles,
     plot_single_batch_cd_depth,
 )
 from profile_extraction import ProfileResult, analyze_section
-from single_profile import SingleDepthCDResult, compute_cd_by_depth, save_single_batch_outputs
+from single_profile import SingleDepthCDResult, SingleTaperResult, compute_cd_by_depth, compute_taper_by_offset, save_single_batch_outputs
 from surface_model import SurfaceGrid, build_profile_based_surface
 
 
@@ -72,12 +76,29 @@ class SingleProfileRunResult:
     roi: Optional[tuple[int, int, int, int]] = None
     profile: Optional[ProfileResult] = None
     cd_result: Optional[SingleDepthCDResult] = None
+    taper_result: Optional[SingleTaperResult] = None
     error: str = ""
 
 
 @dataclass
 class SingleBatchState:
     results: list[SingleProfileRunResult]
+    params: dict
+
+
+@dataclass
+class HHSRunResult:
+    item: SingleImageItem
+    roi: Optional[tuple[int, int, int, int]] = None
+    profile: Optional[ProfileResult] = None
+    hhs_result: Optional[dict] = None
+    error: str = ""
+    group_label: str = ""
+
+
+@dataclass
+class HHSBatchState:
+    results: list[HHSRunResult]
     params: dict
 
 
@@ -303,6 +324,11 @@ class MainWindow(QMainWindow):
         self.single_results: list[SingleProfileRunResult] = []
         self.single_current_index = 0
         self.single_state: Optional[SingleBatchState] = None
+        self.hhs_images: list[SingleImageItem] = []
+        self.hhs_rois: list[Optional[tuple[int, int, int, int]]] = []
+        self.hhs_results: list[HHSRunResult] = []
+        self.hhs_current_index = 0
+        self.hhs_state: Optional[HHSBatchState] = None
 
         self._build_ui()
         self._apply_style()
@@ -317,13 +343,17 @@ class MainWindow(QMainWindow):
         mode_bar.setSpacing(8)
         self.two_section_mode_btn = QPushButton("2-Section 3D Cap Area")
         self.single_profile_mode_btn = QPushButton("Single Section CD-Depth")
+        self.hhs_mode_btn = QPushButton("HHS")
         self.two_section_mode_btn.setCheckable(True)
         self.single_profile_mode_btn.setCheckable(True)
+        self.hhs_mode_btn.setCheckable(True)
         self.two_section_mode_btn.setChecked(True)
         self.two_section_mode_btn.clicked.connect(lambda: self.switch_mode(0))
         self.single_profile_mode_btn.clicked.connect(lambda: self.switch_mode(1))
+        self.hhs_mode_btn.clicked.connect(lambda: self.switch_mode(2))
         mode_bar.addWidget(self.two_section_mode_btn)
         mode_bar.addWidget(self.single_profile_mode_btn)
+        mode_bar.addWidget(self.hhs_mode_btn)
         mode_bar.addStretch(1)
         root_layout.addLayout(mode_bar)
 
@@ -331,15 +361,19 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.mode_stack)
         self.mode_stack.addWidget(self._build_two_section_page())
         self.mode_stack.addWidget(self._build_single_profile_page())
+        self.mode_stack.addWidget(self._build_hhs_page())
 
     def switch_mode(self, index: int) -> None:
         self.mode_stack.setCurrentIndex(index)
         self.two_section_mode_btn.setChecked(index == 0)
         self.single_profile_mode_btn.setChecked(index == 1)
+        self.hhs_mode_btn.setChecked(index == 2)
         if index == 0:
             self.setWindowTitle("FIB-SEM 2-Section Dome Cap Surface Area")
-        else:
+        elif index == 1:
             self.setWindowTitle("FIB-SEM Single Section CD-Depth Profile")
+        else:
+            self.setWindowTitle("FIB-SEM Hill-on-Hill Score")
 
     def _build_two_section_page(self) -> QWidget:
         page = QWidget()
@@ -551,6 +585,13 @@ class MainWindow(QMainWindow):
         self.single_depth_step_spin.setSuffix(" um")
         _configure_spinbox(self.single_depth_step_spin, 0.01)
 
+        self.single_taper_step_spin = QDoubleSpinBox()
+        self.single_taper_step_spin.setRange(0.000001, 100000.0)
+        self.single_taper_step_spin.setDecimals(4)
+        self.single_taper_step_spin.setValue(0.1)
+        self.single_taper_step_spin.setSuffix(" um")
+        _configure_spinbox(self.single_taper_step_spin, 0.01)
+
         self.single_threshold_slider = QSlider(Qt.Horizontal)
         self.single_threshold_slider.setRange(0, 100)
         self.single_threshold_slider.setValue(50)
@@ -568,6 +609,7 @@ class MainWindow(QMainWindow):
             ("pixel_size_um", self.single_pixel_size_spin),
             ("max_depth_um", self.single_max_depth_spin),
             ("depth_step_um", self.single_depth_step_spin),
+            ("taper_step_um", self.single_taper_step_spin),
             ("threshold_sensitivity", self.single_threshold_slider),
             ("smoothing_strength", self.single_smoothing_slider),
             ("morph_strength", self.single_morph_slider),
@@ -626,6 +668,7 @@ class MainWindow(QMainWindow):
             ("success_count", "Success"),
             ("fail_count", "Failed"),
             ("depth_step_um", "Depth step"),
+            ("taper_step_um", "Taper step"),
             ("roi", "Current ROI"),
         ]
         for key, label in items:
@@ -642,8 +685,8 @@ class MainWindow(QMainWindow):
             layout.addWidget(row)
             self.single_result_labels[key] = value
 
-        self.single_table = QTableWidget(0, 5)
-        self.single_table.setHorizontalHeaderLabels(["image", "status", "CD_um", "H_um", "depth_count"])
+        self.single_table = QTableWidget(0, 7)
+        self.single_table.setHorizontalHeaderLabels(["image", "status", "CD_um", "H_um", "depth_count", "left_taper_deg", "right_taper_deg"])
         self.single_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.single_table.verticalHeader().setVisible(False)
         self.single_table.setAlternatingRowColors(True)
@@ -653,6 +696,176 @@ class MainWindow(QMainWindow):
         self.single_message.setWordWrap(True)
         self.single_message.setObjectName("MessageBox")
         layout.addWidget(self.single_message)
+        return panel
+
+    def _build_hhs_page(self) -> QWidget:
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+
+        main_splitter = QSplitter(Qt.Vertical)
+        page_layout.addWidget(main_splitter)
+
+        top_splitter = QSplitter(Qt.Horizontal)
+        main_splitter.addWidget(top_splitter)
+        top_splitter.addWidget(self._build_hhs_left_panel())
+        top_splitter.addWidget(self._build_hhs_center_panel())
+        top_splitter.addWidget(self._build_hhs_result_panel())
+        top_splitter.setSizes([330, 760, 460])
+
+        self.hhs_canvas = _make_canvas(plot_empty_2d("Hill-on-Hill Score"))
+        main_splitter.addWidget(self.hhs_canvas)
+        main_splitter.setSizes([650, 330])
+        return page
+
+    def _build_hhs_left_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("Card")
+        layout = QVBoxLayout(panel)
+        title = QLabel("HHS 입력")
+        title.setObjectName("PanelTitle")
+        layout.addWidget(title)
+
+        self.hhs_load_btn = QPushButton("이미지 여러장 불러오기")
+        self.hhs_synthetic_btn = QPushButton("Synthetic HHS 샘플")
+        self.hhs_load_btn.clicked.connect(self.load_hhs_images)
+        self.hhs_synthetic_btn.clicked.connect(self.load_hhs_synthetic_images)
+        layout.addWidget(self.hhs_load_btn)
+        layout.addWidget(self.hhs_synthetic_btn)
+
+        form = QGridLayout()
+        form.setVerticalSpacing(12)
+
+        self.hhs_pixel_size_spin = QDoubleSpinBox()
+        self.hhs_pixel_size_spin.setRange(0.000001, 1000.0)
+        self.hhs_pixel_size_spin.setDecimals(6)
+        self.hhs_pixel_size_spin.setValue(0.01)
+        self.hhs_pixel_size_spin.setSuffix(" um/px")
+        _configure_spinbox(self.hhs_pixel_size_spin, 0.001)
+
+        self.hhs_light_sigma_spin = QDoubleSpinBox()
+        self.hhs_light_sigma_spin.setRange(0.000001, 1.0)
+        self.hhs_light_sigma_spin.setDecimals(4)
+        self.hhs_light_sigma_spin.setValue(DEFAULT_HHS_SETTINGS["light_smooth_sigma"])
+        _configure_spinbox(self.hhs_light_sigma_spin, 0.005)
+
+        self.hhs_baseline_sigma_spin = QDoubleSpinBox()
+        self.hhs_baseline_sigma_spin.setRange(0.000001, 1.0)
+        self.hhs_baseline_sigma_spin.setDecimals(4)
+        self.hhs_baseline_sigma_spin.setValue(DEFAULT_HHS_SETTINGS["baseline_smooth_sigma"])
+        _configure_spinbox(self.hhs_baseline_sigma_spin, 0.01)
+
+        self.hhs_center_width_spin = QDoubleSpinBox()
+        self.hhs_center_width_spin.setRange(0.000001, 1.0)
+        self.hhs_center_width_spin.setDecimals(4)
+        self.hhs_center_width_spin.setValue(DEFAULT_HHS_SETTINGS["center_width"])
+        _configure_spinbox(self.hhs_center_width_spin, 0.01)
+
+        self.hhs_threshold_slider = QSlider(Qt.Horizontal)
+        self.hhs_threshold_slider.setRange(0, 100)
+        self.hhs_threshold_slider.setValue(50)
+        _configure_slider(self.hhs_threshold_slider, 1, 5)
+        self.hhs_smoothing_slider = QSlider(Qt.Horizontal)
+        self.hhs_smoothing_slider.setRange(0, 10)
+        self.hhs_smoothing_slider.setValue(2)
+        _configure_slider(self.hhs_smoothing_slider, 1, 2)
+        self.hhs_morph_slider = QSlider(Qt.Horizontal)
+        self.hhs_morph_slider.setRange(0, 10)
+        self.hhs_morph_slider.setValue(2)
+        _configure_slider(self.hhs_morph_slider, 1, 2)
+
+        rows = [
+            ("pixel_size_um", self.hhs_pixel_size_spin),
+            ("light_smooth_sigma", self.hhs_light_sigma_spin),
+            ("baseline_smooth_sigma", self.hhs_baseline_sigma_spin),
+            ("center_width", self.hhs_center_width_spin),
+            ("threshold_sensitivity", self.hhs_threshold_slider),
+            ("smoothing_strength", self.hhs_smoothing_slider),
+            ("morph_strength", self.hhs_morph_slider),
+        ]
+        for row, (label, widget) in enumerate(rows):
+            form.addWidget(QLabel(label), row, 0)
+            form.addWidget(widget, row, 1)
+        layout.addLayout(form)
+
+        self.hhs_analyze_btn = QPushButton("HHS 분석 실행")
+        self.hhs_save_btn = QPushButton("HHS 결과 저장")
+        self.hhs_save_btn.setEnabled(False)
+        self.hhs_analyze_btn.clicked.connect(self.run_hhs_analysis)
+        self.hhs_save_btn.clicked.connect(self.save_hhs_results)
+        layout.addWidget(self.hhs_analyze_btn)
+        layout.addWidget(self.hhs_save_btn)
+        layout.addStretch(1)
+        return panel
+
+    def _build_hhs_center_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("Card")
+        layout = QVBoxLayout(panel)
+        title = QLabel("HHS ROI 미리보기")
+        title.setObjectName("PanelTitle")
+        layout.addWidget(title)
+        nav_layout = QHBoxLayout()
+        self.hhs_prev_btn = QPushButton("Previous")
+        self.hhs_next_btn = QPushButton("Next")
+        self.hhs_image_index_label = QLabel("-")
+        self.hhs_image_index_label.setAlignment(Qt.AlignCenter)
+        self.hhs_prev_btn.clicked.connect(self.show_previous_hhs_image)
+        self.hhs_next_btn.clicked.connect(self.show_next_hhs_image)
+        nav_layout.addWidget(self.hhs_prev_btn)
+        nav_layout.addWidget(self.hhs_image_index_label, 1)
+        nav_layout.addWidget(self.hhs_next_btn)
+        layout.addLayout(nav_layout)
+
+        self.hhs_view = ROIImageView("HHS section")
+        self.hhs_view.roi_changed.connect(self._store_current_hhs_roi)
+        layout.addWidget(self.hhs_view)
+        self._update_hhs_navigation()
+        return panel
+
+    def _build_hhs_result_panel(self) -> QWidget:
+        panel = QFrame()
+        panel.setObjectName("Card")
+        layout = QVBoxLayout(panel)
+        title = QLabel("HHS 결과")
+        title.setObjectName("PanelTitle")
+        layout.addWidget(title)
+
+        self.hhs_result_labels: dict[str, QLabel] = {}
+        items = [
+            ("image_count", "Images"),
+            ("success_count", "Success"),
+            ("fail_count", "Failed"),
+            ("hhs", "HHS"),
+            ("bump_area", "bump_area"),
+            ("total_area", "total_area"),
+            ("roi", "Current ROI"),
+        ]
+        for key, label in items:
+            row = QFrame()
+            row.setObjectName("MetricRow")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(10, 7, 10, 7)
+            name = QLabel(label)
+            value = QLabel("-")
+            value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            value.setObjectName("MetricValue")
+            row_layout.addWidget(name)
+            row_layout.addWidget(value)
+            layout.addWidget(row)
+            self.hhs_result_labels[key] = value
+
+        self.hhs_table = QTableWidget(0, 5)
+        self.hhs_table.setHorizontalHeaderLabels(["sample_id", "status", "hhs", "bump_area", "total_area"])
+        self.hhs_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.hhs_table.verticalHeader().setVisible(False)
+        self.hhs_table.setAlternatingRowColors(True)
+        layout.addWidget(self.hhs_table)
+
+        self.hhs_message = QLabel("이미지를 여러 장 불러온 뒤 ROI를 드래그하세요.")
+        self.hhs_message.setWordWrap(True)
+        self.hhs_message.setObjectName("MessageBox")
+        layout.addWidget(self.hhs_message)
         return panel
 
     def _apply_style(self) -> None:
@@ -763,6 +976,57 @@ class MainWindow(QMainWindow):
         self._populate_single_loaded_table()
         self.single_message.setText("Synthetic batch 이미지가 생성되었습니다. 첫 이미지 ROI가 전체 이미지에 공유됩니다.")
 
+    def load_hhs_images(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(self, "HHS 이미지 선택", "", "Images (*.png *.jpg *.jpeg *.tif *.tiff *.bmp);;All files (*.*)")
+        if not paths:
+            return
+        try:
+            self.hhs_images = [
+                SingleImageItem(name=Path(path).name, image=to_grayscale(load_image(path)))
+                for path in paths
+            ]
+            self._reset_hhs_image_state()
+            self._show_hhs_image(0)
+            self.hhs_state = None
+            self.hhs_save_btn.setEnabled(False)
+            self._clear_hhs_results()
+            self._populate_hhs_loaded_table()
+            self.hhs_message.setText(f"{len(self.hhs_images)}개 이미지를 불러왔습니다. ROI를 드래그하세요.")
+        except Exception as exc:
+            QMessageBox.warning(self, "이미지 로드 실패", str(exc))
+
+    def load_hhs_synthetic_images(self) -> None:
+        specs = [(410, 168, 119), (410, 168, 120), (410, 168, 121)]
+        self.hhs_images = []
+        for idx, (cd, height, seed) in enumerate(specs):
+            image = generate_synthetic_mound_image(cd_px=cd, mound_height_px=height, seed=seed)
+            if idx:
+                h, w = image.shape[:2]
+                xs = np.arange(w, dtype=np.float32)
+                center = w * 0.5
+                bump = 52.0 * np.exp(-0.5 * ((xs - center) / (w * 0.045)) ** 2)
+                for x, delta in enumerate(bump.astype(np.int32)):
+                    if delta <= 0:
+                        continue
+                    col = image[:, x]
+                    dark = np.where(col < 115)[0]
+                    if dark.size:
+                        top = int(dark.min())
+                        y0 = max(0, top - delta)
+                        image[y0:top, x] = np.minimum(image[y0:top, x], 55)
+            self.hhs_images.append(SingleImageItem(name=f"hhs_synthetic_{idx + 1}.png", image=image))
+        self._reset_hhs_image_state()
+        for index, item in enumerate(self.hhs_images):
+            roi = _default_synthetic_roi(item.image)
+            self.hhs_rois[index] = roi
+            self.hhs_results[index].roi = roi
+        self._show_hhs_image(0)
+        self.hhs_state = None
+        self.hhs_save_btn.setEnabled(False)
+        self._clear_hhs_results()
+        self._populate_hhs_loaded_table()
+        self.hhs_message.setText("Synthetic HHS 이미지가 생성되었습니다. ROI는 기본값입니다.")
+
     def _params(self) -> dict:
         return {
             "pixel_size_um": self.pixel_size_spin.value(),
@@ -778,9 +1042,21 @@ class MainWindow(QMainWindow):
             "pixel_size_um": self.single_pixel_size_spin.value(),
             "max_depth_um": self.single_max_depth_spin.value(),
             "depth_step_um": self.single_depth_step_spin.value(),
+            "taper_step_um": self.single_taper_step_spin.value(),
             "threshold_sensitivity": self.single_threshold_slider.value(),
             "smoothing_strength": self.single_smoothing_slider.value(),
             "morph_strength": self.single_morph_slider.value(),
+        }
+
+    def _hhs_params(self) -> dict:
+        return {
+            "pixel_size_um": self.hhs_pixel_size_spin.value(),
+            "light_smooth_sigma": self.hhs_light_sigma_spin.value(),
+            "baseline_smooth_sigma": self.hhs_baseline_sigma_spin.value(),
+            "center_width": self.hhs_center_width_spin.value(),
+            "threshold_sensitivity": self.hhs_threshold_slider.value(),
+            "smoothing_strength": self.hhs_smoothing_slider.value(),
+            "morph_strength": self.hhs_morph_slider.value(),
         }
 
     def _reset_single_image_state(self) -> None:
@@ -789,6 +1065,12 @@ class MainWindow(QMainWindow):
         self.single_results = [SingleProfileRunResult(item=item) for item in self.single_images]
         self._update_single_navigation()
 
+    def _reset_hhs_image_state(self) -> None:
+        self.hhs_current_index = 0
+        self.hhs_rois = [None for _ in self.hhs_images]
+        self.hhs_results = [HHSRunResult(item=item) for item in self.hhs_images]
+        self._update_hhs_navigation()
+
     def _store_current_single_roi(self, roi: tuple[int, int, int, int]) -> None:
         if 0 <= self.single_current_index < len(self.single_rois):
             self.single_rois[self.single_current_index] = roi
@@ -796,6 +1078,14 @@ class MainWindow(QMainWindow):
             if self.single_state is not None:
                 self.single_state.results = self.single_results
             self.single_result_labels["roi"].setText(str(roi))
+
+    def _store_current_hhs_roi(self, roi: tuple[int, int, int, int]) -> None:
+        if 0 <= self.hhs_current_index < len(self.hhs_rois):
+            self.hhs_rois[self.hhs_current_index] = roi
+            self.hhs_results[self.hhs_current_index].roi = roi
+            if self.hhs_state is not None:
+                self.hhs_state.results = self.hhs_results
+            self.hhs_result_labels["roi"].setText(str(roi))
 
     def _show_single_image(self, index: int) -> None:
         if not (0 <= index < len(self.single_images)):
@@ -826,11 +1116,48 @@ class MainWindow(QMainWindow):
             else:
                 self.single_image_index_label.setText("-")
 
+    def _show_hhs_image(self, index: int) -> None:
+        if not (0 <= index < len(self.hhs_images)):
+            self._update_hhs_navigation()
+            return
+        self.hhs_current_index = index
+        result = self.hhs_results[index] if index < len(self.hhs_results) else None
+        if result is not None and result.profile is not None:
+            self.hhs_view.set_overlay(plot_detection_overlay(result.item.image, result.profile))
+            if result.hhs_result is not None:
+                self._replace_hhs_canvas(plot_hhs_profile(result.hhs_result))
+        else:
+            self.hhs_view.set_image(self.hhs_images[index].image)
+        roi = self.hhs_rois[index] if index < len(self.hhs_rois) else None
+        if roi is not None:
+            self.hhs_view.set_roi(roi)
+        self._update_hhs_navigation()
+        if hasattr(self, "hhs_table") and index < self.hhs_table.rowCount():
+            self.hhs_table.selectRow(index)
+
+    def _update_hhs_navigation(self) -> None:
+        count = len(self.hhs_images)
+        has_images = count > 0
+        if hasattr(self, "hhs_prev_btn"):
+            self.hhs_prev_btn.setEnabled(has_images and self.hhs_current_index > 0)
+            self.hhs_next_btn.setEnabled(has_images and self.hhs_current_index < count - 1)
+            if has_images:
+                name = self.hhs_images[self.hhs_current_index].name
+                self.hhs_image_index_label.setText(f"{self.hhs_current_index + 1}/{count} - {name}")
+            else:
+                self.hhs_image_index_label.setText("-")
+
     def show_previous_single_image(self) -> None:
         self._show_single_image(self.single_current_index - 1)
 
     def show_next_single_image(self) -> None:
         self._show_single_image(self.single_current_index + 1)
+
+    def show_previous_hhs_image(self) -> None:
+        self._show_hhs_image(self.hhs_current_index - 1)
+
+    def show_next_hhs_image(self) -> None:
+        self._show_hhs_image(self.hhs_current_index + 1)
 
     def run_analysis(self) -> None:
         self.result_panel.clear()
@@ -922,6 +1249,9 @@ class MainWindow(QMainWindow):
         if params["depth_step_um"] <= 0:
             self._single_fail("depth_step_um은 0보다 커야 합니다.")
             return
+        if params["taper_step_um"] <= 0:
+            self._single_fail("taper_step_um은 0보다 커야 합니다.")
+            return
 
         shared_roi = self.single_view.roi
         results: list[SingleProfileRunResult] = []
@@ -938,7 +1268,8 @@ class MainWindow(QMainWindow):
                     coordinate_name="x_um",
                 )
                 cd_result = compute_cd_by_depth(profile, params["max_depth_um"], params["depth_step_um"])
-                results.append(SingleProfileRunResult(item=item, profile=profile, cd_result=cd_result))
+                taper_result = compute_taper_by_offset(profile, params["taper_step_um"])
+                results.append(SingleProfileRunResult(item=item, profile=profile, cd_result=cd_result, taper_result=taper_result))
             except (DetectionError, ValueError) as exc:
                 results.append(SingleProfileRunResult(item=item, error=str(exc)))
             except Exception as exc:
@@ -991,6 +1322,9 @@ class MainWindow(QMainWindow):
         if params["depth_step_um"] <= 0:
             self._single_fail("depth_step_um은 0보다 커야 합니다.")
             return
+        if params["taper_step_um"] <= 0:
+            self._single_fail("taper_step_um은 0보다 커야 합니다.")
+            return
 
         item = self.single_images[self.single_current_index]
         self._store_current_single_roi(current_roi)
@@ -1006,11 +1340,13 @@ class MainWindow(QMainWindow):
                 coordinate_name="x_um",
             )
             cd_result = compute_cd_by_depth(profile, params["max_depth_um"], params["depth_step_um"])
+            taper_result = compute_taper_by_offset(profile, params["taper_step_um"])
             self.single_results[self.single_current_index] = SingleProfileRunResult(
                 item=item,
                 roi=current_roi,
                 profile=profile,
                 cd_result=cd_result,
+                taper_result=taper_result,
             )
             self.single_view.set_overlay(plot_detection_overlay(item.image, profile))
             self.single_view.set_roi(current_roi)
@@ -1038,11 +1374,73 @@ class MainWindow(QMainWindow):
             messages.append(f"{clipped_count} images were clipped to their effective profile height.")
         self.single_message.setText("\n".join(messages))
 
+    def run_hhs_analysis(self) -> None:
+        if not self.hhs_images:
+            self._hhs_fail("HHS 이미지를 먼저 불러와야 합니다.")
+            return
+        current_roi = self.hhs_view.roi
+        if current_roi is None:
+            self._hhs_fail("ROI를 먼저 드래그해야 합니다.")
+            return
+
+        params = self._hhs_params()
+        try:
+            compute_hill_on_hill_score(
+                np.linspace(-1.0, 1.0, 20),
+                np.linspace(0.0, 1.0, 20),
+                params,
+            )
+        except ValueError as exc:
+            self._hhs_fail(str(exc))
+            return
+
+        results: list[HHSRunResult] = []
+        for item in self.hhs_images:
+            try:
+                profile = analyze_section(
+                    item.image,
+                    current_roi,
+                    pixel_size_um=params["pixel_size_um"],
+                    threshold_sensitivity=params["threshold_sensitivity"],
+                    smoothing_strength=params["smoothing_strength"],
+                    morph_strength=params["morph_strength"],
+                    axis_name="hhs",
+                    coordinate_name="x_um",
+                )
+                hhs_result = compute_hill_on_hill_score(profile.coord_um, profile.z_um, params)
+                error = hhs_result["reason"] if hhs_result["status"] != "OK" else ""
+                results.append(HHSRunResult(item=item, roi=current_roi, profile=profile, hhs_result=hhs_result, error=error))
+            except (DetectionError, ValueError) as exc:
+                results.append(HHSRunResult(item=item, roi=current_roi, error=str(exc)))
+            except Exception as exc:
+                results.append(HHSRunResult(item=item, roi=current_roi, error=f"Unexpected error: {exc}"))
+
+        self.hhs_results = results
+        self.hhs_rois = [current_roi for _ in self.hhs_images]
+        self.hhs_state = HHSBatchState(results=results, params=params)
+        success = [result for result in results if result.hhs_result is not None and result.hhs_result["status"] == "OK"]
+        self.hhs_save_btn.setEnabled(bool(results))
+        self._update_hhs_results()
+        if success:
+            first_success = success[0]
+            self.hhs_view.set_overlay(plot_detection_overlay(first_success.item.image, first_success.profile))
+            self._replace_hhs_canvas(plot_hhs_profile(first_success.hhs_result))
+        else:
+            self._replace_hhs_canvas(plot_hhs_batch(results))
+        fail_count = len([result for result in results if result.hhs_result is None or result.hhs_result["status"] != "OK"])
+        self.hhs_message.setText(f"HHS 분석 완료. 총 {len(results)}개 중 {len(success)}개 계산 가능, {fail_count}개 계산 불가.")
+
     def _clear_single_results(self) -> None:
         for label in self.single_result_labels.values():
             label.setText("-")
         self.single_table.setRowCount(0)
         self.single_message.setText("이미지를 여러 장 불러온 뒤 첫 이미지에서 ROI를 드래그하세요.")
+
+    def _clear_hhs_results(self) -> None:
+        for label in self.hhs_result_labels.values():
+            label.setText("-")
+        self.hhs_table.setRowCount(0)
+        self.hhs_message.setText("이미지를 여러 장 불러온 뒤 ROI를 드래그하세요.")
 
     def _update_single_results(self) -> None:
         if self.single_state is None:
@@ -1054,6 +1452,7 @@ class MainWindow(QMainWindow):
         self.single_result_labels["success_count"].setText(str(len(success)))
         self.single_result_labels["fail_count"].setText(str(len(failed)))
         self.single_result_labels["depth_step_um"].setText(f"{self.single_state.params['depth_step_um']:.4f} um")
+        self.single_result_labels["taper_step_um"].setText(f"{self.single_state.params['taper_step_um']:.4f} um")
         current_roi = self.single_rois[self.single_current_index] if self.single_rois else None
         self.single_result_labels["roi"].setText(str(current_roi) if current_roi else "-")
 
@@ -1066,9 +1465,11 @@ class MainWindow(QMainWindow):
                     f"{result.profile.cd_um:.5f}",
                     f"{result.profile.height_um:.5f}",
                     str(result.cd_result.depth_um.size),
+                    _format_taper_mean(result.taper_result, "left"),
+                    _format_taper_mean(result.taper_result, "right"),
                 ]
             else:
-                values = [result.item.name, result.error or "NOT_ANALYZED", "-", "-", "-"]
+                values = [result.item.name, result.error or "NOT_ANALYZED", "-", "-", "-", "-", "-"]
             for col_idx, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 if col_idx >= 2:
@@ -1086,9 +1487,67 @@ class MainWindow(QMainWindow):
         self.single_result_labels["success_count"].setText("-")
         self.single_result_labels["fail_count"].setText("-")
         self.single_result_labels["depth_step_um"].setText(f"{self.single_depth_step_spin.value():.4f} um")
+        self.single_result_labels["taper_step_um"].setText(f"{self.single_taper_step_spin.value():.4f} um")
         current_roi = self.single_rois[self.single_current_index] if self.single_rois else None
         self.single_result_labels["roi"].setText(str(current_roi) if current_roi else "-")
         self._update_single_navigation()
+
+    def _update_hhs_results(self) -> None:
+        if self.hhs_state is None:
+            return
+        results = self.hhs_state.results
+        success = [result for result in results if result.hhs_result is not None and result.hhs_result["status"] == "OK"]
+        failed = [result for result in results if result not in success]
+        self.hhs_result_labels["image_count"].setText(str(len(results)))
+        self.hhs_result_labels["success_count"].setText(str(len(success)))
+        self.hhs_result_labels["fail_count"].setText(str(len(failed)))
+        current_roi = self.hhs_rois[self.hhs_current_index] if self.hhs_rois else None
+        self.hhs_result_labels["roi"].setText(str(current_roi) if current_roi else "-")
+        if success:
+            first = success[0].hhs_result
+            self.hhs_result_labels["hhs"].setText(_format_float(first["hhs"]))
+            self.hhs_result_labels["bump_area"].setText(_format_float(first["bump_area"]))
+            self.hhs_result_labels["total_area"].setText(_format_float(first["total_area"]))
+        else:
+            self.hhs_result_labels["hhs"].setText("-")
+            self.hhs_result_labels["bump_area"].setText("-")
+            self.hhs_result_labels["total_area"].setText("-")
+
+        self.hhs_table.setRowCount(len(results))
+        for row_idx, result in enumerate(results):
+            hhs_result = result.hhs_result
+            if hhs_result is not None:
+                values = [
+                    result.item.name,
+                    hhs_result["status"],
+                    _format_float(hhs_result["hhs"]),
+                    _format_float(hhs_result["bump_area"]),
+                    _format_float(hhs_result["total_area"]),
+                ]
+            else:
+                values = [result.item.name, result.error or "FAILED", "-", "-", "-"]
+            for col_idx, value in enumerate(values):
+                item = QTableWidgetItem(str(value))
+                if col_idx >= 2:
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self.hhs_table.setItem(row_idx, col_idx, item)
+
+    def _populate_hhs_loaded_table(self) -> None:
+        results = self.hhs_results or [HHSRunResult(item=item) for item in self.hhs_images]
+        self.hhs_table.setRowCount(len(results))
+        for row_idx, result in enumerate(results):
+            values = [result.item.name, "LOADED", "-", "-", "-"]
+            for col_idx, value in enumerate(values):
+                self.hhs_table.setItem(row_idx, col_idx, QTableWidgetItem(value))
+        self.hhs_result_labels["image_count"].setText(str(len(self.hhs_images)))
+        self.hhs_result_labels["success_count"].setText("-")
+        self.hhs_result_labels["fail_count"].setText("-")
+        self.hhs_result_labels["hhs"].setText("-")
+        self.hhs_result_labels["bump_area"].setText("-")
+        self.hhs_result_labels["total_area"].setText("-")
+        current_roi = self.hhs_rois[self.hhs_current_index] if self.hhs_rois else None
+        self.hhs_result_labels["roi"].setText(str(current_roi) if current_roi else "-")
+        self._update_hhs_navigation()
 
     def _replace_single_profile_canvas(self, figure) -> None:
         new_canvas = _make_canvas(figure)
@@ -1099,6 +1558,16 @@ class MainWindow(QMainWindow):
             parent_splitter.insertWidget(index, new_canvas)
             parent_splitter.setSizes([650, 330])
         self.single_profile_canvas = new_canvas
+
+    def _replace_hhs_canvas(self, figure) -> None:
+        new_canvas = _make_canvas(figure)
+        parent_splitter = self.hhs_canvas.parent()
+        if isinstance(parent_splitter, QSplitter):
+            index = parent_splitter.indexOf(self.hhs_canvas)
+            self.hhs_canvas.setParent(None)
+            parent_splitter.insertWidget(index, new_canvas)
+            parent_splitter.setSizes([650, 330])
+        self.hhs_canvas = new_canvas
 
     def _update_plots(self) -> None:
         if self.state is None:
@@ -1165,6 +1634,42 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._single_fail(f"Batch 프로파일 결과 저장 실패: {exc}")
 
+    def save_hhs_results(self) -> None:
+        if self.hhs_state is None:
+            self._hhs_fail("저장할 HHS 분석 결과가 없습니다.")
+            return
+        try:
+            output_dir = create_output_dir(Path.cwd())
+            hhs_profile_dir = output_dir / "hhs_profiles"
+            hhs_overlay_dir = output_dir / "hhs_overlays"
+            hhs_plot_dir = output_dir / "hhs_plots"
+            for directory in [hhs_profile_dir, hhs_overlay_dir, hhs_plot_dir]:
+                directory.mkdir(parents=True, exist_ok=True)
+
+            rows = []
+            for index, result in enumerate(self.hhs_state.results):
+                sample_id = result.item.name
+                hhs_result = result.hhs_result
+                if result.profile is not None:
+                    stem = Path(sample_id).stem or f"sample_{index + 1}"
+                    profile_depth = np.clip(result.profile.z_um, 0.0, None)
+                    pd.DataFrame(
+                        {
+                            result.profile.coordinate_name: result.profile.coord_um,
+                            "height_from_baseline_um": profile_depth,
+                        }
+                    ).to_csv(hhs_profile_dir / f"{stem}_hhs_profile.csv", index=False)
+                    plot_detection_overlay(result.item.image, result.profile, hhs_overlay_dir / f"{stem}_hhs_overlay.png")
+                    if hhs_result is not None:
+                        plot_hhs_profile(hhs_result, hhs_plot_dir / f"{stem}_hhs_profile.png")
+                rows.append(_hhs_summary_row(sample_id, result, self.hhs_state.params))
+
+            pd.DataFrame(rows).to_csv(output_dir / "hhs_result_summary.csv", index=False)
+            plot_hhs_batch(self.hhs_state.results, output_dir / "hhs_batch_distribution.png")
+            self.hhs_message.setText(f"HHS 결과 저장 완료:\n{output_dir}")
+        except Exception as exc:
+            self._hhs_fail(f"HHS 결과 저장 실패: {exc}")
+
     def _fail(self, message: str) -> None:
         self.result_panel.message.setText(message)
         self.save_btn.setEnabled(False)
@@ -1172,6 +1677,10 @@ class MainWindow(QMainWindow):
     def _single_fail(self, message: str) -> None:
         self.single_message.setText(message)
         self.single_save_btn.setEnabled(False)
+
+    def _hhs_fail(self, message: str) -> None:
+        self.hhs_message.setText(message)
+        self.hhs_save_btn.setEnabled(False)
 
 
 def _default_synthetic_roi(image: np.ndarray) -> tuple[int, int, int, int]:
@@ -1181,6 +1690,54 @@ def _default_synthetic_roi(image: np.ndarray) -> tuple[int, int, int, int]:
     x = (w - roi_w) // 2
     y = int(h * 0.17)
     return x, y, roi_w, roi_h
+
+
+def _format_taper_mean(taper_result: SingleTaperResult | None, side: str) -> str:
+    if taper_result is None:
+        return "-"
+    mask = taper_result.side == side
+    if not np.any(mask):
+        return "-"
+    return f"{float(np.nanmean(taper_result.taper_angle_deg[mask])):.3f}"
+
+
+def _format_float(value) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "-"
+    if not np.isfinite(number):
+        return "NaN"
+    return f"{number:.6f}"
+
+
+def _hhs_summary_row(sample_id: str, result: HHSRunResult, params: dict) -> dict:
+    hhs_result = result.hhs_result or {}
+    profile = result.profile
+    roi = result.roi
+    return {
+        "sample_id": sample_id,
+        "status": hhs_result.get("status", "FAILED"),
+        "error": result.error or hhs_result.get("reason", ""),
+        "hhs": hhs_result.get("hhs", np.nan),
+        "bump_area": hhs_result.get("bump_area", np.nan),
+        "total_area": hhs_result.get("total_area", np.nan),
+        "light_smooth_sigma": params["light_smooth_sigma"],
+        "baseline_smooth_sigma": params["baseline_smooth_sigma"],
+        "center_width": params["center_width"],
+        "x_center_used": hhs_result.get("x_center_used", np.nan),
+        "profile_width_used": hhs_result.get("profile_width_used", np.nan),
+        "CD_um": profile.cd_um if profile is not None else np.nan,
+        "H_um": profile.height_um if profile is not None else np.nan,
+        "pixel_size_um": params["pixel_size_um"],
+        "threshold_sensitivity": params["threshold_sensitivity"],
+        "smoothing_strength": params["smoothing_strength"],
+        "morph_strength": params["morph_strength"],
+        "roi_x": roi[0] if roi else np.nan,
+        "roi_y": roi[1] if roi else np.nan,
+        "roi_w": roi[2] if roi else np.nan,
+        "roi_h": roi[3] if roi else np.nan,
+    }
 
 
 def plot_profiles_empty():

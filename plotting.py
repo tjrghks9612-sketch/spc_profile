@@ -8,6 +8,7 @@ import numpy as np
 from matplotlib.figure import Figure
 
 from area_calculation import CapMetrics
+from image_processing import save_image
 from profile_extraction import ProfileResult
 from surface_model import SurfaceGrid
 
@@ -96,7 +97,7 @@ def plot_detection_overlay(gray: np.ndarray, profile: ProfileResult, output_path
     cv2.putText(overlay, f"H {profile.height_um:.3f} um", (min(center + 8, overlay.shape[1] - 160), max(18, top_y - 8)), font, 0.55, (248, 113, 113), 2)
 
     if output_path:
-        cv2.imwrite(str(output_path), cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
+        save_image(output_path, cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
     return overlay
 
 
@@ -118,7 +119,7 @@ def plot_profiles(horizontal: ProfileResult, vertical: ProfileResult, output_pat
     return fig
 
 
-def plot_single_profile_cd_depth(profile: ProfileResult, cd_result, output_path: str | Path | None = None) -> Figure:
+def plot_single_profile_cd_depth(profile: ProfileResult, cd_result, output_path: str | Path | None = None, taper_result=None) -> Figure:
     fig = Figure(figsize=(7.2, 4.2), facecolor=BG)
     ax = fig.add_subplot(111)
     _style_axes(ax)
@@ -140,9 +141,19 @@ def plot_single_profile_cd_depth(profile: ProfileResult, cd_result, output_path:
         ax.scatter(cd_result.left_x_um, cd_result.depth_um, s=12, color=ACCENT_2, label="CD intersections")
         ax.scatter(cd_result.right_x_um, cd_result.depth_um, s=12, color=ACCENT_2)
 
+    if taper_result is not None and len(taper_result.x_um):
+        ax.scatter(
+            taper_result.x_um,
+            taper_result.depth_from_apex_um,
+            s=18,
+            color="#F472B6",
+            marker="x",
+            label="Taper samples",
+        )
+
     ax.set_xlabel("Centered coordinate (um)")
     ax.set_ylabel("Depth from apex (um, down +)")
-    ax.set_title("Single-section CD by depth")
+    ax.set_title("Single-section CD-depth and taper")
     ax.invert_yaxis()
     ax.legend(facecolor=PANEL, edgecolor="#334155", labelcolor=FG)
     fig.tight_layout()
@@ -202,6 +213,76 @@ def plot_single_batch_cd_depth(results, output_path: str | Path | None = None) -
 
     if success:
         ax_profile.legend(facecolor=PANEL, edgecolor="#334155", labelcolor=FG, fontsize=7)
+    fig.tight_layout()
+    _save_fig(fig, output_path)
+    return fig
+
+
+def plot_hhs_profile(hhs_result: dict, output_path: str | Path | None = None) -> Figure:
+    fig = Figure(figsize=(7.2, 4.2), facecolor=BG)
+    ax = fig.add_subplot(111)
+    _style_axes(ax)
+
+    x = hhs_result.get("x_norm", np.asarray([], dtype=np.float64))
+    y = hhs_result.get("y_norm", np.asarray([], dtype=np.float64))
+    baseline = hhs_result.get("baseline", np.asarray([], dtype=np.float64))
+    positive = hhs_result.get("positive_residual", np.asarray([], dtype=np.float64))
+    center_width = float(hhs_result.get("center_width", 0.35))
+
+    if len(x) and len(y):
+        ax.plot(x, y, color=ACCENT, linewidth=2.0, label="Normalized profile")
+    if len(x) and len(baseline) and np.any(np.isfinite(baseline)):
+        ax.plot(x, baseline, color=ACCENT_2, linewidth=2.0, label="Large-scale baseline B(x)")
+    if len(x) and len(positive):
+        fill_top = baseline + positive if len(baseline) == len(positive) else positive
+        ax.fill_between(x, baseline, fill_top, where=positive > 0, color=WARN, alpha=0.35, label="HHS bump area")
+
+    ax.axvline(-center_width, color="#F472B6", linewidth=1.2, linestyle="--", label="center_width")
+    ax.axvline(center_width, color="#F472B6", linewidth=1.2, linestyle="--")
+    ax.set_xlim(-1.05, 1.05)
+    ax.set_ylim(-0.05, 1.08)
+    ax.set_xlabel("Normalized centered coordinate")
+    ax.set_ylabel("Normalized height")
+    ax.set_title("Hill-on-Hill Score")
+    ax.legend(facecolor=PANEL, edgecolor="#334155", labelcolor=FG, fontsize=8)
+    fig.tight_layout()
+    _save_fig(fig, output_path)
+    return fig
+
+
+def plot_hhs_batch(results, output_path: str | Path | None = None) -> Figure:
+    fig = Figure(figsize=(7.2, 4.2), facecolor=BG)
+    ax = fig.add_subplot(111)
+    _style_axes(ax)
+
+    success = [
+        result
+        for result in results
+        if result.hhs_result is not None and np.isfinite(float(result.hhs_result.get("hhs", np.nan)))
+    ]
+    values = np.asarray([float(result.hhs_result["hhs"]) for result in success], dtype=np.float64)
+    labels = [getattr(result, "group_label", "") for result in success]
+    has_groups = any(label for label in labels)
+
+    if values.size and has_groups:
+        groups = sorted({label or "ungrouped" for label in labels})
+        grouped = [values[np.asarray([(label or "ungrouped") == group for label in labels])] for group in groups]
+        ax.boxplot(grouped, labels=groups, patch_artist=True)
+        for idx, group_values in enumerate(grouped, start=1):
+            jitter = np.linspace(-0.06, 0.06, group_values.size) if group_values.size > 1 else np.asarray([0.0])
+            ax.scatter(np.full(group_values.size, idx) + jitter, group_values, color=ACCENT, s=18, alpha=0.85)
+        ax.set_xlabel("group_label")
+    elif values.size:
+        ax.hist(values, bins=min(12, max(3, values.size)), color=ACCENT, alpha=0.72, edgecolor="#0B1120")
+        ax.scatter(values, np.zeros_like(values), color=WARN, s=22, alpha=0.9, label="samples")
+        ax.set_xlabel("HHS")
+        ax.legend(facecolor=PANEL, edgecolor="#334155", labelcolor=FG, fontsize=8)
+    else:
+        ax.text(0.5, 0.5, "No valid HHS results", transform=ax.transAxes, ha="center", va="center", color=MUTED)
+        ax.set_xlabel("HHS")
+
+    ax.set_ylabel("Count" if not has_groups else "HHS")
+    ax.set_title("HHS batch distribution")
     fig.tight_layout()
     _save_fig(fig, output_path)
     return fig
