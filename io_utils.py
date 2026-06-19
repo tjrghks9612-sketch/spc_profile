@@ -33,6 +33,7 @@ def _profile_to_frame(profile: ProfileResult) -> pd.DataFrame:
             "depth_from_apex_um": depth_um,
             "height_from_baseline_um": profile.z_um,
             "r_normalized": np.abs(profile.coord_um) / (profile.cd_um * 0.5),
+            "edge_mode": profile.edge_mode,
         }
     )
 
@@ -43,7 +44,7 @@ def build_summary(
     surface: SurfaceGrid,
     cap: CapMetrics,
     params: dict[str, Any],
-) -> dict[str, float]:
+) -> dict[str, Any]:
     return {
         "CD_x_um": horizontal.cd_um,
         "CD_y_um": vertical.cd_um,
@@ -60,6 +61,7 @@ def build_summary(
         "threshold_sensitivity": float(params["threshold_sensitivity"]),
         "smoothing_strength": float(params["smoothing_strength"]),
         "morph_strength": float(params["morph_strength"]),
+        "edge_mode": params.get("edge_mode", horizontal.edge_mode),
         "sanity_check_x_rmse_um": surface.sanity_check_x_rmse_um,
         "sanity_check_y_rmse_um": surface.sanity_check_y_rmse_um,
     }

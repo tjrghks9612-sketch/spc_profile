@@ -226,6 +226,7 @@ def save_single_profile_outputs(
             profile.coordinate_name: profile.coord_um,
             "depth_from_apex_um": depth,
             "height_from_baseline_um": profile.z_um,
+            "edge_mode": profile.edge_mode,
         }
     ).to_csv(output_dir / "single_profile.csv", index=False)
 
@@ -246,6 +247,7 @@ def save_single_profile_outputs(
         "threshold_sensitivity": float(params["threshold_sensitivity"]),
         "smoothing_strength": float(params["smoothing_strength"]),
         "morph_strength": float(params["morph_strength"]),
+        "edge_mode": params.get("edge_mode", profile.edge_mode),
     }
     pd.DataFrame([summary]).to_csv(output_dir / "single_result_summary.csv", index=False)
     plot_single_profile_cd_depth(profile, cd_result, output_dir / "single_profile_cd_depth.png", taper_result=taper_result)
@@ -331,6 +333,7 @@ def save_single_batch_outputs(
                     "taper_step_um": float(params.get("taper_step_um", np.nan)),
                     "left_taper_angle_mean_deg": np.nan,
                     "right_taper_angle_mean_deg": np.nan,
+                    "edge_mode": params.get("edge_mode", ""),
                     "roi_x": roi[0] if roi else np.nan,
                     "roi_y": roi[1] if roi else np.nan,
                     "roi_w": roi[2] if roi else np.nan,
@@ -352,6 +355,7 @@ def save_single_batch_outputs(
                 profile.coordinate_name: profile.coord_um,
                 "depth_from_apex_um": depth,
                 "height_from_baseline_um": profile.z_um,
+                "edge_mode": profile.edge_mode,
             }
         ).to_csv(profile_dir / f"{stem}_profile.csv", index=False)
         cd_result.to_frame().to_csv(cd_dir / f"{stem}_cd_by_depth.csv", index=False)
@@ -386,6 +390,7 @@ def save_single_batch_outputs(
                 "threshold_sensitivity": float(params["threshold_sensitivity"]),
                 "smoothing_strength": float(params["smoothing_strength"]),
                 "morph_strength": float(params["morph_strength"]),
+                "edge_mode": params.get("edge_mode", profile.edge_mode),
             }
         )
 

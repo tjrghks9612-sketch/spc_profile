@@ -14,6 +14,7 @@ from PySide6.QtGui import QImage, QMouseEvent, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
+    QComboBox,
     QDoubleSpinBox,
     QFileDialog,
     QFrame,
@@ -469,6 +470,10 @@ class MainWindow(QMainWindow):
         self.morph_slider.setValue(2)
         _configure_slider(self.morph_slider, 1, 2)
 
+        self.edge_mode_combo = QComboBox()
+        self.edge_mode_combo.addItem("Outer coating edge", "outer")
+        self.edge_mode_combo.addItem("Inner gradient edge", "inner_gradient")
+
         self.grid_spin = QSpinBox()
         self.grid_spin.setRange(30, 1200)
         self.grid_spin.setValue(400)
@@ -480,6 +485,7 @@ class MainWindow(QMainWindow):
             ("threshold_sensitivity", self.threshold_slider),
             ("smoothing_strength", self.smoothing_slider),
             ("morph_strength", self.morph_slider),
+            ("edge_mode", self.edge_mode_combo),
             ("grid_resolution", self.grid_spin),
         ]
         for row, (label, widget) in enumerate(rows):
@@ -605,6 +611,10 @@ class MainWindow(QMainWindow):
         self.single_morph_slider.setValue(2)
         _configure_slider(self.single_morph_slider, 1, 2)
 
+        self.single_edge_mode_combo = QComboBox()
+        self.single_edge_mode_combo.addItem("Outer coating edge", "outer")
+        self.single_edge_mode_combo.addItem("Inner gradient edge", "inner_gradient")
+
         rows = [
             ("pixel_size_um", self.single_pixel_size_spin),
             ("max_depth_um", self.single_max_depth_spin),
@@ -613,6 +623,7 @@ class MainWindow(QMainWindow):
             ("threshold_sensitivity", self.single_threshold_slider),
             ("smoothing_strength", self.single_smoothing_slider),
             ("morph_strength", self.single_morph_slider),
+            ("edge_mode", self.single_edge_mode_combo),
         ]
         for row, (label, widget) in enumerate(rows):
             form.addWidget(QLabel(label), row, 0)
@@ -774,6 +785,10 @@ class MainWindow(QMainWindow):
         self.hhs_morph_slider.setValue(2)
         _configure_slider(self.hhs_morph_slider, 1, 2)
 
+        self.hhs_edge_mode_combo = QComboBox()
+        self.hhs_edge_mode_combo.addItem("Outer coating edge", "outer")
+        self.hhs_edge_mode_combo.addItem("Inner gradient edge", "inner_gradient")
+
         rows = [
             ("pixel_size_um", self.hhs_pixel_size_spin),
             ("light_smooth_sigma", self.hhs_light_sigma_spin),
@@ -782,6 +797,7 @@ class MainWindow(QMainWindow):
             ("threshold_sensitivity", self.hhs_threshold_slider),
             ("smoothing_strength", self.hhs_smoothing_slider),
             ("morph_strength", self.hhs_morph_slider),
+            ("edge_mode", self.hhs_edge_mode_combo),
         ]
         for row, (label, widget) in enumerate(rows):
             form.addWidget(QLabel(label), row, 0)
@@ -880,6 +896,9 @@ class MainWindow(QMainWindow):
             QPushButton:checked { background:#0EA5E9; color:#06111F; border-color:#7DD3FC; font-weight:700; }
             QPushButton:disabled { color:#64748B; background:#111827; border-color:#1F2937; }
             QPushButton#CompactButton { padding:5px 9px; }
+            QComboBox { background:#0B1120; border:1px solid #334155; border-radius:6px; padding:6px 24px 6px 6px; color:#E5E7EB; }
+            QComboBox::drop-down { border-left:1px solid #334155; width:22px; background:#172033; }
+            QComboBox QAbstractItemView { background:#0B1120; color:#E5E7EB; selection-background-color:#1E293B; border:1px solid #334155; }
             QDoubleSpinBox, QSpinBox { background:#0B1120; border:1px solid #334155; border-radius:6px; padding:6px 24px 6px 6px; color:#E5E7EB; }
             QDoubleSpinBox::up-button, QSpinBox::up-button { subcontrol-origin:border; subcontrol-position:top right; width:20px; border-left:1px solid #334155; border-bottom:1px solid #273449; border-top-right-radius:6px; background:#172033; }
             QDoubleSpinBox::down-button, QSpinBox::down-button { subcontrol-origin:border; subcontrol-position:bottom right; width:20px; border-left:1px solid #334155; border-bottom-right-radius:6px; background:#172033; }
@@ -1034,6 +1053,7 @@ class MainWindow(QMainWindow):
             "threshold_sensitivity": self.threshold_slider.value(),
             "smoothing_strength": self.smoothing_slider.value(),
             "morph_strength": self.morph_slider.value(),
+            "edge_mode": self.edge_mode_combo.currentData(),
             "grid_resolution": self.grid_spin.value(),
         }
 
@@ -1046,6 +1066,7 @@ class MainWindow(QMainWindow):
             "threshold_sensitivity": self.single_threshold_slider.value(),
             "smoothing_strength": self.single_smoothing_slider.value(),
             "morph_strength": self.single_morph_slider.value(),
+            "edge_mode": self.single_edge_mode_combo.currentData(),
         }
 
     def _hhs_params(self) -> dict:
@@ -1057,6 +1078,7 @@ class MainWindow(QMainWindow):
             "threshold_sensitivity": self.hhs_threshold_slider.value(),
             "smoothing_strength": self.hhs_smoothing_slider.value(),
             "morph_strength": self.hhs_morph_slider.value(),
+            "edge_mode": self.hhs_edge_mode_combo.currentData(),
         }
 
     def _reset_single_image_state(self) -> None:
@@ -1186,6 +1208,7 @@ class MainWindow(QMainWindow):
                 morph_strength=params["morph_strength"],
                 axis_name="horizontal",
                 coordinate_name="x_um",
+                edge_mode=params["edge_mode"],
             )
             vertical_profile = analyze_section(
                 self.vertical_image,
@@ -1196,6 +1219,7 @@ class MainWindow(QMainWindow):
                 morph_strength=params["morph_strength"],
                 axis_name="vertical",
                 coordinate_name="y_um",
+                edge_mode=params["edge_mode"],
             )
             surface = build_profile_based_surface(horizontal_profile, vertical_profile, params["grid_resolution"])
             nan_ratio = float(np.count_nonzero(~np.isfinite(surface.Z)) / surface.Z.size)
@@ -1266,6 +1290,7 @@ class MainWindow(QMainWindow):
                     morph_strength=params["morph_strength"],
                     axis_name="single",
                     coordinate_name="x_um",
+                    edge_mode=params["edge_mode"],
                 )
                 cd_result = compute_cd_by_depth(profile, params["max_depth_um"], params["depth_step_um"])
                 taper_result = compute_taper_by_offset(profile, params["taper_step_um"])
@@ -1338,6 +1363,7 @@ class MainWindow(QMainWindow):
                 morph_strength=params["morph_strength"],
                 axis_name="single",
                 coordinate_name="x_um",
+                edge_mode=params["edge_mode"],
             )
             cd_result = compute_cd_by_depth(profile, params["max_depth_um"], params["depth_step_um"])
             taper_result = compute_taper_by_offset(profile, params["taper_step_um"])
@@ -1406,6 +1432,7 @@ class MainWindow(QMainWindow):
                     morph_strength=params["morph_strength"],
                     axis_name="hhs",
                     coordinate_name="x_um",
+                    edge_mode=params["edge_mode"],
                 )
                 hhs_result = compute_hill_on_hill_score(profile.coord_um, profile.z_um, params)
                 error = hhs_result["reason"] if hhs_result["status"] != "OK" else ""
@@ -1657,6 +1684,7 @@ class MainWindow(QMainWindow):
                         {
                             result.profile.coordinate_name: result.profile.coord_um,
                             "height_from_baseline_um": profile_depth,
+                            "edge_mode": result.profile.edge_mode,
                         }
                     ).to_csv(hhs_profile_dir / f"{stem}_hhs_profile.csv", index=False)
                     plot_detection_overlay(result.item.image, result.profile, hhs_overlay_dir / f"{stem}_hhs_overlay.png")
@@ -1733,6 +1761,7 @@ def _hhs_summary_row(sample_id: str, result: HHSRunResult, params: dict) -> dict
         "threshold_sensitivity": params["threshold_sensitivity"],
         "smoothing_strength": params["smoothing_strength"],
         "morph_strength": params["morph_strength"],
+        "edge_mode": params.get("edge_mode", profile.edge_mode if profile is not None else ""),
         "roi_x": roi[0] if roi else np.nan,
         "roi_y": roi[1] if roi else np.nan,
         "roi_w": roi[2] if roi else np.nan,

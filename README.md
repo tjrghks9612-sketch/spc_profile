@@ -122,10 +122,20 @@ surface area는 X, Y, Z가 모두 um 단위인 mesh grid에서 계산됩니다. 
 - `threshold_sensitivity`: threshold sensitivity
 - `smoothing_strength`: smoothing strength
 - `morph_strength`: morphology strength
+- `edge_mode`: profile boundary 선택 모드
 - `sanity_check_x_rmse_um`: y=0 단면 depth와 가로 profile depth 비교 RMSE
 - `sanity_check_y_rmse_um`: x=0 단면 depth와 세로 profile depth 비교 RMSE
 
 `horizontal_profile.csv`와 `vertical_profile.csv`의 `z_um`은 apex 기준 depth입니다. 추적용으로 `height_from_baseline_um`도 함께 저장합니다.
+
+## Edge 선택
+
+코팅된 FIB/SEM 시료처럼 외곽 코팅 경계와 실제 구조물 경계가 다를 때는 `edge_mode`를 바꿔 profile 경계를 선택합니다.
+
+- `Outer coating edge`: 기존 방식입니다. threshold mask의 가장 위쪽 경계를 profile로 씁니다.
+- `Inner gradient edge`: mask 내부에서 위쪽 외곽선 아래의 강한 grayscale gradient를 찾아 실제 시료 경계 후보로 씁니다.
+
+`Inner gradient edge`는 자동 후보 선택이므로 overlay를 보고 선택된 선이 실제 구조물 경계인지 확인해야 합니다. 내부 gradient가 충분히 강하지 않은 column은 기존 outer edge로 fallback합니다.
 
 ## 저장 파일
 
@@ -156,7 +166,7 @@ surface area는 X, Y, Z가 모두 um 단위인 mesh grid에서 계산됩니다. 
 
 1. FIB-SEM 단면 이미지를 한 장 또는 여러 장 동시에 불러옵니다.
 2. 첫 번째 미리보기 이미지에서 ROI를 드래그합니다.
-3. `pixel_size_um`, `max_depth_um`, `depth_step_um`, threshold/smoothing/morphology 값을 설정합니다.
+3. `pixel_size_um`, `max_depth_um`, `depth_step_um`, edge mode, threshold/smoothing/morphology 값을 설정합니다.
 4. `프로파일 분석 실행`을 누릅니다.
 5. 모든 이미지에 동일한 ROI와 옵션을 적용해 ROI 내부 dark mound의 top boundary profile을 추출하고, apex 기준 depth별 CD를 계산합니다.
 6. `Batch CD-depth 결과 저장`으로 결과를 저장합니다.

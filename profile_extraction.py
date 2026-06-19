@@ -35,6 +35,7 @@ class ProfileResult:
     z_um: np.ndarray
     normalized_r: np.ndarray
     normalized_f: np.ndarray
+    edge_mode: str = "outer"
 
 
 def estimate_baseline(component_mask: np.ndarray, contour: np.ndarray | None = None) -> float:
@@ -108,6 +109,55 @@ def extract_top_boundary_profile(component_mask: np.ndarray, smoothing_strength:
 
     top_y = _smooth_1d(top_y, smoothing_strength)
     return xs.astype(np.int32), top_y.astype(np.float32)
+
+
+def extract_inner_gradient_boundary_profile(
+    crop_gray: np.ndarray,
+    component_mask: np.ndarray,
+    smoothing_strength: float = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    mask = component_mask > 0
+    xs = np.where(mask.any(axis=0))[0]
+    if xs.size < 8:
+        raise DetectionError("inner edge profile point 수가 부족합니다.")
+
+    gray = crop_gray.astype(np.float32)
+    edge_y = np.empty(xs.shape, dtype=np.float32)
+    for idx, x in enumerate(xs):
+        ys = np.where(mask[:, x])[0]
+        top = int(ys.min())
+        bottom = int(ys.max())
+        if bottom - top < 6:
+            edge_y[idx] = float(top)
+            continue
+
+        segment = gray[top : bottom + 1, x]
+        gradient = np.abs(np.gradient(segment))
+        ignore_top = max(2, int(round(segment.size * 0.08)))
+        search_start = min(ignore_top, segment.size - 3)
+        search_end = max(search_start + 1, segment.size - 2)
+        search_gradient = gradient[search_start:search_end]
+        candidate_idx = int(np.argmax(search_gradient)) + search_start
+        contrast = float(np.nanpercentile(segment, 95) - np.nanpercentile(segment, 5))
+        min_gradient = max(2.0, contrast * 0.12)
+        if float(gradient[candidate_idx]) < min_gradient:
+            edge_y[idx] = float(top)
+        else:
+            edge_y[idx] = float(top + candidate_idx)
+
+    edge_y = _smooth_1d(edge_y, smoothing_strength)
+    return xs.astype(np.int32), edge_y.astype(np.float32)
+
+
+def extract_boundary_profile(
+    crop_gray: np.ndarray,
+    component_mask: np.ndarray,
+    edge_mode: str = "outer",
+    smoothing_strength: float = 0,
+) -> tuple[np.ndarray, np.ndarray]:
+    if edge_mode == "inner_gradient":
+        return extract_inner_gradient_boundary_profile(crop_gray, component_mask, smoothing_strength=smoothing_strength)
+    return extract_top_boundary_profile(component_mask, smoothing_strength=smoothing_strength)
 
 
 def measure_cd_height(
@@ -202,6 +252,7 @@ def analyze_section(
     morph_strength: float,
     axis_name: str,
     coordinate_name: str,
+    edge_mode: str = "outer",
 ) -> ProfileResult:
     roi = clamp_roi(roi, gray_image.shape)
     crop = crop_roi(gray_image, roi)
@@ -213,7 +264,7 @@ def analyze_section(
     )
     contour = extract_contour(detection.component_mask)
     baseline = estimate_baseline(detection.component_mask, contour)
-    top_x, top_y = extract_top_boundary_profile(detection.component_mask, smoothing_strength=smoothing_strength)
+    top_x, top_y = extract_boundary_profile(crop, detection.component_mask, edge_mode=edge_mode, smoothing_strength=smoothing_strength)
     left, right, center, cd_um, height_um, coord_um, z_um = measure_cd_height(top_x, top_y, baseline, pixel_size_um)
     normalized_r, normalized_f = normalize_profile(coord_um, z_um, cd_um, height_um)
 
@@ -236,4 +287,5 @@ def analyze_section(
         z_um=z_um,
         normalized_r=normalized_r,
         normalized_f=normalized_f,
+        edge_mode=edge_mode,
     )
